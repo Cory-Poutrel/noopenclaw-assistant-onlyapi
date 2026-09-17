@@ -924,6 +924,34 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sendResumeBroadcast()
     }
 
+    fun stopVoiceSession() {
+        nextSpeechRequestId()
+        lastInputWasVoice = false
+        cancelInitialFillerPhrase()
+        cancelWaitPhraseTimer()
+        stopThinkingSound()
+        stopAuxiliarySpeech()
+        listeningJob?.cancel()
+        listeningJob = null
+        ignoreNextTtsStop = true
+        ttsManager?.stop()
+        speakingJob?.cancel()
+        speakingJob = null
+        speechManager.destroy()
+        _uiState.update {
+            it.copy(
+                isListening = false,
+                isThinking = false,
+                isSpeaking = false,
+                isPreparingSpeech = false,
+                partialText = "",
+                error = null
+            )
+        }
+        releaseWakeLock()
+        sendResumeBroadcast()
+    }
+
     /**
      * Returns true if a voice conversation is currently active
      * (listening, thinking after voice input, or speaking a voice response).

@@ -215,15 +215,10 @@ class ChatActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Only stop listening if we are NOT in an active voice conversation.
-        // During voice interaction (listening/speaking/thinking), keep the session alive
-        // even when the screen turns off. The WakeLock in ChatViewModel keeps the CPU alive.
-        if (!viewModel.isVoiceSessionActive()) {
-            viewModel.stopListening()
-            // Resume hotword detection now that the mic will be released.
-            // setPackage is required to reach NodeForegroundService (RECEIVER_NOT_EXPORTED).
-            sendBroadcast(Intent(HotwordService.ACTION_RESUME_HOTWORD).apply { setPackage(packageName) })
-        }
+        viewModel.stopVoiceSession()
+        // Resume hotword detection now that the mic will be released.
+        // setPackage is required to reach NodeForegroundService (RECEIVER_NOT_EXPORTED).
+        sendBroadcast(Intent(HotwordService.ACTION_RESUME_HOTWORD).apply { setPackage(packageName) })
     }
 
     override fun onDestroy() {

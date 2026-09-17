@@ -90,11 +90,19 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     @Volatile private var ignoreNextTtsStop = false
     private val interruptReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != "com.openclaw.assistant.ACTION_INTERRUPT_TTS") return
-            if (currentState.value != AssistantState.SPEAKING &&
-                currentState.value != AssistantState.PREPARING_SPEECH) return
-            Log.d(TAG, "Barge-in interrupt received in OpenClawSession")
-            interruptAndListen()
+            when (intent?.action) {
+                "com.openclaw.assistant.ACTION_INTERRUPT_TTS" -> {
+                    if (currentState.value != AssistantState.SPEAKING &&
+                        currentState.value != AssistantState.PREPARING_SPEECH) return
+                    Log.d(TAG, "Barge-in interrupt received in OpenClawSession")
+                    interruptAndListen()
+                }
+                Intent.ACTION_SCREEN_OFF -> {
+                    Log.d(TAG, "Screen turned off; closing voice interaction session")
+                    cleanupSession()
+                    finish()
+                }
+            }
         }
     }
 
@@ -139,7 +147,10 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
         androidx.core.content.ContextCompat.registerReceiver(
             context,
             interruptReceiver,
-            android.content.IntentFilter("com.openclaw.assistant.ACTION_INTERRUPT_TTS"),
+            android.content.IntentFilter().apply {
+                addAction("com.openclaw.assistant.ACTION_INTERRUPT_TTS")
+                addAction(Intent.ACTION_SCREEN_OFF)
+            },
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
         )
     }
@@ -207,6 +218,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
+        isCleanedUp = false
 
         // Recreate scope if it was cancelled by a previous onHide()
         if (!scope.isActive) {
@@ -296,37 +308,29 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     override fun onHide() {
         super.onHide()
 
-        // ユーザーが明示的に Close ボタンを押した場合は、音声状態に関わらず必ずクリーンアップ
-        if (isUserDismissed) {
-            isUserDismissed = false
-            cleanupSession()
-            return
-        }
-
-        // If a voice session is active (listening, thinking, or speaking),
-        // keep resources alive so conversation continues with screen off.
-        val state = currentState.value
-        val isVoiceActive = state == AssistantState.LISTENING ||
-                state == AssistantState.THINKING ||
-                state == AssistantState.SPEAKING ||
-                state == AssistantState.PREPARING_SPEECH ||
-                state == AssistantState.PROCESSING
-        
-        if (isVoiceActive) {
-            Log.d(TAG, "onHide: voice session active ($state), keeping resources alive")
-            // Keep scope, speechManager, ttsManager alive
-            // SessionForegroundService is already running
-            return
-        }
-
+        // Hiding the assistant must release mic/TTS resources instead of keeping a voice loop alive.
+        isUserDismissed = false
+        Log.d(TAG, "onHide: closing voice interaction session")
         cleanupSession()
     }
 
     private fun cleanupSession() {
-        lifecycleRegistry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_PAUSE)
-        lifecycleRegistry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_STOP)
+        if (isCleanedUp) return
+        isCleanedUp = true
+
+        try {
+            lifecycleRegistry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_PAUSE)
+            lifecycleRegistry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_STOP)
+        } catch (e: Exception) {
+            Log.w(TAG, "Lifecycle cleanup already applied", e)
+        }
 
         // Clean up audio resources
+        listeningJob?.cancel()
+        speakingJob?.cancel()
+        listeningJob = null
+        speakingJob = null
+        ignoreNextTtsStop = true
         cancelInitialFillerPhrase()
         cancelWaitPhraseTimer()
         stopThinkingSound()
@@ -334,9 +338,16 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
         abandonAudioFocus()
         SessionForegroundService.stop(context)
         scope.cancel()
-        speechManager.destroy()
-        ttsManager.stop()
+        if (this::speechManager.isInitialized) {
+            speechManager.destroy()
+        }
+        if (this::ttsManager.isInitialized) {
+            ttsManager.stop()
+        }
         releaseWakeLock()
+        currentState.value = AssistantState.IDLE
+        partialText.value = ""
+        audioLevel.value = 0f
 
         // Resume Hotword
         sendResumeBroadcast()
@@ -382,6 +393,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     private var listeningJob: Job? = null
     private var speakingJob: Job? = null
     private var isUserDismissed = false
+    private var isCleanedUp = false
 
     private fun startListening(initialDelayMs: Long = 50L) {
         Log.d(TAG, "startListening() called, currentState=${currentState.value}, listeningJob=${listeningJob}, speakingJob=${speakingJob}")
