@@ -8,6 +8,7 @@ import android.service.voice.VoiceInteractionSession
 import android.speech.SpeechRecognizer
 import android.util.Log
 import android.view.LayoutInflater
+import android.view.WindowManager
 import com.openclaw.assistant.BuildConfig
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import android.view.View
@@ -216,9 +217,13 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
             }
             
             setContent {
+                val assistantState = currentState.value
+                LaunchedEffect(assistantState) {
+                    setScreenAwake(assistantState.keepsScreenAwake())
+                }
                 VoiceOverlayTheme(darkTheme = settings.assistantOverlayDarkTheme) {
                     AssistantUI(
-                        state = currentState.value,
+                        state = assistantState,
                         messages = conversationMessages,
                         darkTheme = settings.assistantOverlayDarkTheme,
                         displayText = displayText.value,
@@ -399,6 +404,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
         scope.cancel()
         speechManager.destroy()
         ttsManager.stop()
+        setScreenAwake(false)
         releaseWakeLock()
 
         // Resume Hotword
@@ -424,6 +430,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
         ttsManager.shutdown()
         toneGeneratorReleased.set(true)
         toneGenerator.release()
+        setScreenAwake(false)
         releaseWakeLock()
     }
 
@@ -1303,6 +1310,18 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
         Log.d(TAG, "WakeLock acquired")
     }
 
+    private fun setScreenAwake(enabled: Boolean) {
+        assistantContentView?.keepScreenOn = enabled
+        window?.window?.let { sessionWindow ->
+            if (enabled) {
+                sessionWindow.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                sessionWindow.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+        Log.d(TAG, "Keep screen awake: $enabled")
+    }
+
     private fun releaseWakeLock() {
         wakeLock?.let {
             if (it.isHeld) {
@@ -1326,6 +1345,13 @@ enum class AssistantState {
     SPEAKING,
     ERROR
 }
+
+private fun AssistantState.keepsScreenAwake(): Boolean =
+    this == AssistantState.LISTENING ||
+        this == AssistantState.PROCESSING ||
+        this == AssistantState.THINKING ||
+        this == AssistantState.PREPARING_SPEECH ||
+        this == AssistantState.SPEAKING
 
 data class ConversationMessage(
     val text: String,
