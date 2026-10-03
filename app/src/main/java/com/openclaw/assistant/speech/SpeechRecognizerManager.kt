@@ -10,6 +10,8 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognitionService
@@ -24,6 +26,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 /**
@@ -37,6 +40,15 @@ class SpeechRecognizerManager(private val context: Context) {
     private var audioPipeWrite: ParcelFileDescriptor? = null
     private var audioCaptureJob: Job? = null
     private var foregroundContextRef: WeakReference<Context>? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
+        }
+    }
 
     private fun releaseContinuousAudioSource() {
         audioCaptureJob?.cancel()
@@ -98,18 +110,26 @@ class SpeechRecognizerManager(private val context: Context) {
         
         android.util.Log.e("SpeechRecognizerManager", "startListening called, language=$targetLanguage, isAvailable=${isAvailable()}")
 
-        // Always destroy and recreate recognizer to avoid race condition
-        // between awaitClose cancel() and new startListening()
+        // Always cancel and destroy the previous recognizer before creating the
+        // next one. Keeping this cleanup on the main thread prevents a delayed
+        // cleanup from an older flow from interfering with the new session.
         withContext(Dispatchers.Main) {
             releaseContinuousAudioSource()
-            if (recognizer != null) {
+            val previousRecognizer = recognizer
+            if (previousRecognizer != null) {
                 android.util.Log.d("SpeechRecognizerManager", "Destroying previous recognizer before recreation")
                 try {
-                    recognizer?.destroy()
+                    previousRecognizer.cancel()
+                    previousRecognizer.destroy()
                 } catch (e: Exception) {
                     android.util.Log.w("SpeechRecognizerManager", "Failed to destroy previous recognizer", e)
                 }
-                recognizer = null
+                if (recognizer === previousRecognizer) {
+                    recognizer = null
+                }
+                // Give Android's recognition service a brief opportunity to
+                // release the previous binder session and microphone handle.
+                delay(RECOGNIZER_RELEASE_DELAY_MS)
             }
             val recognitionContext = recognitionContext()
             if (SpeechRecognizer.isRecognitionAvailable(recognitionContext)) {
@@ -242,6 +262,14 @@ class SpeechRecognizerManager(private val context: Context) {
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, silenceTimeoutMs)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, silenceTimeoutMs)
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                putExtra(
+                    RecognizerIntent.EXTRA_ENABLE_FORMATTING,
+                    RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY
+                )
+                putExtra(RecognizerIntent.EXTRA_HIDE_PARTIAL_TRAILING_PUNCTUATION, true)
+            }
+
             // Try hidden/unofficial extra to enforce minimum length if supported
             putExtra("android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", silenceTimeoutMs)
         }
@@ -343,19 +371,20 @@ class SpeechRecognizerManager(private val context: Context) {
 
         awaitClose {
             android.util.Log.d("SpeechRecognizerManager", "awaitClose: flow closing, destroying recognizer")
-            releaseContinuousAudioSource()
-            // Destroy recognizer immediately on close to ensure clean state
-            // Next startListening() will create a fresh instance
-            @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-            kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+            if (recognizer === currentRecognizer) {
+                releaseContinuousAudioSource()
+            }
+            runOnMain {
                 try {
                     currentRecognizer.cancel()
                     currentRecognizer.destroy()
                 } catch (e: Exception) {
                     android.util.Log.w("SpeechRecognizerManager", "awaitClose cleanup failed", e)
                 }
+                if (recognizer === currentRecognizer) {
+                    recognizer = null
+                }
             }
-            recognizer = null
         }
     }
 
@@ -365,8 +394,7 @@ class SpeechRecognizerManager(private val context: Context) {
     fun stopListening() {
         val currentRecognizer = recognizer ?: return
         releaseContinuousAudioSource()
-        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-        kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+        runOnMain {
             try {
                 currentRecognizer.stopListening()
             } catch (e: Exception) {
@@ -381,15 +409,21 @@ class SpeechRecognizerManager(private val context: Context) {
     fun destroy() {
         val currentRecognizer = recognizer
         releaseContinuousAudioSource()
-        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-        kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+        runOnMain {
             try {
+                currentRecognizer?.cancel()
                 currentRecognizer?.destroy()
             } catch (e: Exception) {
                 // Ignore
             }
+            if (recognizer === currentRecognizer) {
+                recognizer = null
+            }
         }
-        recognizer = null
+    }
+
+    private companion object {
+        const val RECOGNIZER_RELEASE_DELAY_MS = 150L
     }
 }
 

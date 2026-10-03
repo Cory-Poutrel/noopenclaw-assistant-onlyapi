@@ -453,7 +453,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     private var speakingJob: Job? = null
     private var isUserDismissed = false
 
-    private fun startListening(initialDelayMs: Long = 50L, preserveManualBuffer: Boolean = false) {
+    private fun startListening(initialDelayMs: Long = 200L, preserveManualBuffer: Boolean = false) {
         if (settings.dictationMode == SettingsRepository.DICTATION_MODE_MANUAL) {
             startManualListening(initialDelayMs, preserveManualBuffer)
         } else {
