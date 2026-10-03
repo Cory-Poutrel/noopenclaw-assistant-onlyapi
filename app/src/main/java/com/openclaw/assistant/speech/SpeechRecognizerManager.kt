@@ -1,10 +1,16 @@
 package com.openclaw.assistant.speech
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognitionService
 import android.speech.RecognizerIntent
@@ -17,6 +23,8 @@ import java.util.Locale
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 
 /**
  * Speech Recognition Manager
@@ -24,7 +32,35 @@ import kotlinx.coroutines.launch
 class SpeechRecognizerManager(private val context: Context) {
 
     private var recognizer: SpeechRecognizer? = null
+    private var audioRecord: AudioRecord? = null
+    private var audioPipeRead: ParcelFileDescriptor? = null
+    private var audioPipeWrite: ParcelFileDescriptor? = null
+    private var audioCaptureJob: Job? = null
     private var foregroundContextRef: WeakReference<Context>? = null
+
+    private fun releaseContinuousAudioSource() {
+        audioCaptureJob?.cancel()
+        audioCaptureJob = null
+        try {
+            audioRecord?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            audioRecord?.release()
+        } catch (_: Exception) {
+        }
+        audioRecord = null
+        try {
+            audioPipeWrite?.close()
+        } catch (_: Exception) {
+        }
+        try {
+            audioPipeRead?.close()
+        } catch (_: Exception) {
+        }
+        audioPipeWrite = null
+        audioPipeRead = null
+    }
 
     fun attachForegroundContext(context: Context) {
         foregroundContextRef = WeakReference(context)
@@ -52,7 +88,11 @@ class SpeechRecognizerManager(private val context: Context) {
      * Start speech recognition and return results as a Flow
      * If language is null, use system default
      */
-    fun startListening(language: String? = null, silenceTimeoutMs: Long = 2500L): Flow<SpeechResult> = callbackFlow {
+    fun startListening(
+        language: String? = null,
+        silenceTimeoutMs: Long = 2500L,
+        segmentedSession: Boolean = false
+    ): Flow<SpeechResult> = callbackFlow {
         // Determine default language
         val targetLanguage = language ?: Locale.getDefault().toLanguageTag()
         
@@ -61,6 +101,7 @@ class SpeechRecognizerManager(private val context: Context) {
         // Always destroy and recreate recognizer to avoid race condition
         // between awaitClose cancel() and new startListening()
         withContext(Dispatchers.Main) {
+            releaseContinuousAudioSource()
             if (recognizer != null) {
                 android.util.Log.d("SpeechRecognizerManager", "Destroying previous recognizer before recreation")
                 try {
@@ -72,8 +113,16 @@ class SpeechRecognizerManager(private val context: Context) {
             }
             val recognitionContext = recognitionContext()
             if (SpeechRecognizer.isRecognitionAvailable(recognitionContext)) {
-                recognizer = SpeechRecognizer.createSpeechRecognizer(recognitionContext)
-                android.util.Log.d("SpeechRecognizerManager", "Created new recognizer instance")
+                recognizer = if (segmentedSession &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    SpeechRecognizer.isOnDeviceRecognitionAvailable(recognitionContext)
+                ) {
+                    android.util.Log.d("SpeechRecognizerManager", "Creating on-device recognizer for segmented session")
+                    SpeechRecognizer.createOnDeviceSpeechRecognizer(recognitionContext)
+                } else {
+                    android.util.Log.d("SpeechRecognizerManager", "Creating default recognizer instance")
+                    SpeechRecognizer.createSpeechRecognizer(recognitionContext)
+                }
             }
         }
 
@@ -160,6 +209,27 @@ class SpeechRecognizerManager(private val context: Context) {
                 }
             }
 
+            override fun onSegmentResults(segmentResults: Bundle) {
+                val matches = segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val confidence = segmentResults.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
+                val bestMatch = matches?.firstOrNull()?.trim()
+                if (!bestMatch.isNullOrEmpty()) {
+                    trySend(
+                        SpeechResult.SegmentResult(
+                            text = bestMatch,
+                            confidence = confidence?.getOrNull(0) ?: 0f,
+                            alternatives = matches.drop(1).filter { it.isNotBlank() }
+                        )
+                    )
+                }
+            }
+
+            override fun onEndOfSegmentedSession() {
+                android.util.Log.d("SpeechRecognizerManager", "onEndOfSegmentedSession")
+                trySend(SpeechResult.EndOfSegmentedSession)
+                close()
+            }
+
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
 
@@ -171,9 +241,63 @@ class SpeechRecognizerManager(private val context: Context) {
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, silenceTimeoutMs)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, silenceTimeoutMs)
-            
+
             // Try hidden/unofficial extra to enforce minimum length if supported
             putExtra("android.speech.extras.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", silenceTimeoutMs)
+        }
+
+        var continuousAudioEnabled = false
+        if (segmentedSession && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                val audioContext = recognitionContext()
+                if (audioContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    throw SecurityException("RECORD_AUDIO permission is required for continuous dictation")
+                }
+                val sampleRate = 16_000
+                val minimumBufferSize = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                val bufferSize = minimumBufferSize.coerceAtLeast(sampleRate)
+                val pipe = ParcelFileDescriptor.createPipe()
+                val record = AudioRecord.Builder()
+                    .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufferSize)
+                    .build()
+
+                if (record.state == AudioRecord.STATE_INITIALIZED) {
+                    audioRecord = record
+                    audioPipeRead = pipe[0]
+                    audioPipeWrite = pipe[1]
+                    intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, pipe[0])
+                    intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                    intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                    intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, sampleRate)
+                    intent.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
+                    continuousAudioEnabled = true
+                    android.util.Log.d("SpeechRecognizerManager", "Continuous microphone source prepared")
+                } else {
+                    record.release()
+                    pipe.forEach { it.close() }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("SpeechRecognizerManager", "Continuous microphone source unavailable", e)
+                releaseContinuousAudioSource()
+                intent.putExtra(
+                    RecognizerIntent.EXTRA_SEGMENTED_SESSION,
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS
+                )
+            }
         }
 
         // Run on Main thread
@@ -189,8 +313,37 @@ class SpeechRecognizerManager(private val context: Context) {
              }
         }
 
+        if (continuousAudioEnabled) {
+            val currentAudioRecord = audioRecord
+            val currentWritePipe = audioPipeWrite
+            if (currentAudioRecord != null && currentWritePipe != null) {
+                audioCaptureJob = launch(Dispatchers.IO) {
+                    val output = ParcelFileDescriptor.AutoCloseOutputStream(currentWritePipe)
+                    val buffer = ByteArray(16_000)
+                    try {
+                        currentAudioRecord.startRecording()
+                        while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                            val count = currentAudioRecord.read(buffer, 0, buffer.size)
+                            if (count <= 0) break
+                            output.write(buffer, 0, count)
+                        }
+                    } catch (e: Exception) {
+                        if (kotlinx.coroutines.currentCoroutineContext().isActive) {
+                            android.util.Log.w("SpeechRecognizerManager", "Continuous audio capture stopped", e)
+                        }
+                    } finally {
+                        try {
+                            output.close()
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            }
+        }
+
         awaitClose {
             android.util.Log.d("SpeechRecognizerManager", "awaitClose: flow closing, destroying recognizer")
+            releaseContinuousAudioSource()
             // Destroy recognizer immediately on close to ensure clean state
             // Next startListening() will create a fresh instance
             @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
@@ -209,8 +362,17 @@ class SpeechRecognizerManager(private val context: Context) {
     /**
      * Stop listening manually
      */
-    fun stopListening() { 
-        // No-op, flow cancellation triggers cleanup
+    fun stopListening() {
+        val currentRecognizer = recognizer ?: return
+        releaseContinuousAudioSource()
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+            try {
+                currentRecognizer.stopListening()
+            } catch (e: Exception) {
+                android.util.Log.w("SpeechRecognizerManager", "stopListening failed", e)
+            }
+        }
     }
 
     /**
@@ -218,6 +380,7 @@ class SpeechRecognizerManager(private val context: Context) {
      */
     fun destroy() {
         val currentRecognizer = recognizer
+        releaseContinuousAudioSource()
         @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
         kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
             try {
@@ -244,5 +407,11 @@ sealed class SpeechResult {
         val confidence: Float,
         val alternatives: List<String>
     ) : SpeechResult()
+    data class SegmentResult(
+        val text: String,
+        val confidence: Float,
+        val alternatives: List<String>
+    ) : SpeechResult()
+    object EndOfSegmentedSession : SpeechResult()
     data class Error(val message: String, val code: Int? = null) : SpeechResult()
 }

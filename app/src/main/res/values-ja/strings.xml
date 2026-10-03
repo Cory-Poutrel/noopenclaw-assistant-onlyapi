@@ -161,6 +161,15 @@
 <string name="resume_latest_session_desc">起動時に前回の会話を継続する</string>
 <string name="speech_silence_timeout">無音タイムアウト</string>
 <string name="speech_silence_timeout_desc">発話後の待機時間</string>
+<string name="dictation_mode">音声入力モード</string>
+<string name="dictation_mode_desc">一時停止で送信するか、手動で送信するかを選択します</string>
+<string name="dictation_mode_automatic">自動</string>
+<string name="dictation_mode_manual">手動</string>
+<string name="manual_dictation_send">送信</string>
+<string name="manual_dictation_cancel">キャンセル</string>
+<string name="manual_dictation_resume">音声入力を再開</string>
+<string name="manual_dictation_pause">音声入力を一時停止</string>
+<string name="manual_dictation_paused">一時停止中</string>
 <string name="speech_language_label">音声言語</string>
 <string name="speech_language_desc">音声認識と応答の言語</string>
 <string name="display_language_label">表示言語</string>

@@ -171,6 +171,15 @@
     <string name="resume_latest_session_desc">Continue previous conversation on activation</string>
     <string name="speech_silence_timeout">Silence Timeout</string>
     <string name="speech_silence_timeout_desc">Wait time after speech pause</string>
+    <string name="dictation_mode">Dictation Mode</string>
+    <string name="dictation_mode_desc">Choose whether a pause sends the message or you submit it manually</string>
+    <string name="dictation_mode_automatic">Automatic</string>
+    <string name="dictation_mode_manual">Manual</string>
+    <string name="manual_dictation_send">Send</string>
+    <string name="manual_dictation_cancel">Cancel</string>
+    <string name="manual_dictation_resume">Resume dictation</string>
+    <string name="manual_dictation_pause">Pause dictation</string>
+    <string name="manual_dictation_paused">Paused</string>
     <string name="speech_language_label">Speech Language</string>
     <string name="speech_language_desc">Language for voice recognition and responses</string>
     <string name="display_language_label">Display Language</string>

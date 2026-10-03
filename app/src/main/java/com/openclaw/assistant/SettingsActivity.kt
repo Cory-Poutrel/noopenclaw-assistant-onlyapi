@@ -257,6 +257,7 @@ fun SettingsScreen(
     var customWakeWord by rememberSaveable { mutableStateOf(settings.customWakeWord) }
     var wakeWordSensitivity by rememberSaveable { mutableStateOf(settings.wakeWordSensitivity) }
     var speechSilenceTimeout by rememberSaveable { mutableStateOf(settings.speechSilenceTimeout.toFloat().coerceIn(5000f, 30000f)) }
+    var dictationMode by rememberSaveable { mutableStateOf(settings.dictationMode) }
     var speechLanguage by rememberSaveable { mutableStateOf(settings.speechLanguage) }
     var appLanguage by rememberSaveable { mutableStateOf(settings.appLanguage) }
     var thinkingSoundEnabled by rememberSaveable { mutableStateOf(settings.thinkingSoundEnabled) }
@@ -483,6 +484,7 @@ fun SettingsScreen(
                             settings.wakeWordSensitivity = wakeWordSensitivity
                             settings.wakewordConnectionType = wakewordConnectionType
                             settings.speechSilenceTimeout = speechSilenceTimeout.toLong()
+                            settings.dictationMode = dictationMode
                             settings.speechLanguage = speechLanguage
                             settings.appLanguage = appLanguage
                             settings.thinkingSoundEnabled = thinkingSoundEnabled
@@ -1315,6 +1317,48 @@ fun SettingsScreen(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), thickness = 0.5.dp)
 
+                    Text(
+                        text = stringResource(R.string.dictation_mode),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = stringResource(R.string.dictation_mode_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { dictationMode = SettingsRepository.DICTATION_MODE_AUTOMATIC },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = dictationMode == SettingsRepository.DICTATION_MODE_AUTOMATIC,
+                                onClick = { dictationMode = SettingsRepository.DICTATION_MODE_AUTOMATIC }
+                            )
+                            Text(stringResource(R.string.dictation_mode_automatic))
+                        }
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { dictationMode = SettingsRepository.DICTATION_MODE_MANUAL },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = dictationMode == SettingsRepository.DICTATION_MODE_MANUAL,
+                                onClick = { dictationMode = SettingsRepository.DICTATION_MODE_MANUAL }
+                            )
+                            Text(stringResource(R.string.dictation_mode_manual))
+                        }
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), thickness = 0.5.dp)
+
                     // Speech silence timeout
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1337,7 +1381,8 @@ fun SettingsScreen(
                         onValueChange = { speechSilenceTimeout = it },
                         valueRange = 5000f..30000f,
                         steps = 4,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = dictationMode == SettingsRepository.DICTATION_MODE_AUTOMATIC
                     )
                 }
             }

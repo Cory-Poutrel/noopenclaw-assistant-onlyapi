@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Close
@@ -45,6 +46,7 @@ import com.openclaw.assistant.OpenClawApplication
 import com.openclaw.assistant.data.SettingsRepository
 import com.openclaw.assistant.api.OpenClawClient
 import com.openclaw.assistant.speech.SpeechRecognizerManager
+import com.openclaw.assistant.speech.ManualDictationBuffer
 import com.openclaw.assistant.speech.TTSManager
 import com.openclaw.assistant.speech.TTSState
 import com.openclaw.assistant.speech.SpeechResult
@@ -105,6 +107,22 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     private var partialText = mutableStateOf("")
     private var errorMessage = mutableStateOf<String?>(null)
     private var audioLevel = mutableStateOf(0f) // Audio level for visualization
+    private val manualDictationBuffer = ManualDictationBuffer()
+    private var manualRecognitionActive = mutableStateOf(false)
+    private var manualDictationCancelled = mutableStateOf(false)
+    private var manualSubmitRequested = false
+    private var manualSubmissionInProgress = false
+
+    private val localizedUiContext: Context by lazy {
+        val languageTag = settings.appLanguage.trim()
+        if (languageTag.isBlank()) {
+            context
+        } else {
+            val configuration = android.content.res.Configuration(context.resources.configuration)
+            configuration.setLocale(java.util.Locale.forLanguageTag(languageTag))
+            context.createConfigurationContext(configuration)
+        }
+    }
 
     // WakeLock to keep CPU alive during voice conversation when screen is off
     private var wakeLock: PowerManager.WakeLock? = null
@@ -174,7 +192,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
 
     override fun onCreateContentView(): View {
         Log.e(TAG, "Session onCreateContentView")
-        val composeView = ComposeView(context).apply {
+        val composeView = ComposeView(localizedUiContext).apply {
             Log.e(TAG, "Initializing ComposeView with owners")
             // Set ViewTree owners using extensions
             try {
@@ -198,7 +216,15 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
                         finish()
                     },
                     onRetry = { startListening() },
-                    onInterrupt = { interruptAndListen() }
+                    onInterrupt = { interruptAndListen() },
+                    manualDictationEnabled = settings.dictationMode == SettingsRepository.DICTATION_MODE_MANUAL,
+                    manualDictationListening = manualRecognitionActive.value,
+                    manualDictationCancelled = manualDictationCancelled.value,
+                    canSubmitManualDictation = manualDictationBuffer.text().isNotBlank() && !manualSubmissionInProgress,
+                    onSubmitManualDictation = { requestManualSubmission() },
+                    onCancelManualDictation = { cancelManualDictation() },
+                    onPauseManualDictation = { pauseManualDictation() },
+                    onResumeManualDictation = { resumeManualDictation() }
                 )
             }
         }
@@ -383,8 +409,16 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     private var speakingJob: Job? = null
     private var isUserDismissed = false
 
-    private fun startListening(initialDelayMs: Long = 50L) {
-        Log.d(TAG, "startListening() called, currentState=${currentState.value}, listeningJob=${listeningJob}, speakingJob=${speakingJob}")
+    private fun startListening(initialDelayMs: Long = 50L, preserveManualBuffer: Boolean = false) {
+        if (settings.dictationMode == SettingsRepository.DICTATION_MODE_MANUAL) {
+            startManualListening(initialDelayMs, preserveManualBuffer)
+        } else {
+            startAutomaticListening(initialDelayMs)
+        }
+    }
+
+    private fun startAutomaticListening(initialDelayMs: Long) {
+        Log.d(TAG, "startAutomaticListening() called, currentState=${currentState.value}, listeningJob=${listeningJob}, speakingJob=${speakingJob}")
         listeningJob?.cancel()
         acquireWakeLock()
         sendPauseBroadcast()
@@ -395,6 +429,143 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
         partialText.value = ""
         errorMessage.value = null
         audioLevel.value = 0f
+
+        scope.launch {
+            delay(2000L)
+            if (currentState.value == AssistantState.PROCESSING) {
+                Log.w(TAG, "SpeechResult.Ready timeout — forcing LISTENING state")
+                currentState.value = AssistantState.LISTENING
+            }
+        }
+
+        listeningJob = scope.launch {
+            val startTime = System.currentTimeMillis()
+            var hasActuallySpoken = false
+
+            delay(initialDelayMs)
+
+            while (isActive && !hasActuallySpoken) {
+                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    audioFocusRequest = android.media.AudioFocusRequest.Builder(
+                        android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+                    ).build()
+                    audioManager.requestAudioFocus(audioFocusRequest!!)
+                } else {
+                    @Suppress("DEPRECATION")
+                    audioManager.requestAudioFocus(
+                        null,
+                        android.media.AudioManager.STREAM_MUSIC,
+                        android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                    )
+                }
+
+                val listenResult = withTimeoutOrNull(30_000L) {
+                    speechManager.startListening(
+                        settings.speechLanguage.ifEmpty { null },
+                        settings.speechSilenceTimeout
+                    ).collectLatest { result ->
+                        when (result) {
+                            is SpeechResult.Ready -> {
+                                Log.d(TAG, "SpeechResult.Ready received, transitioning to LISTENING")
+                                currentState.value = AssistantState.LISTENING
+                                playTone(android.media.ToneGenerator.TONE_PROP_BEEP)
+                            }
+                            is SpeechResult.Processing -> Unit
+                            is SpeechResult.Listening -> {
+                                if (currentState.value != AssistantState.LISTENING) {
+                                    currentState.value = AssistantState.LISTENING
+                                }
+                            }
+                            is SpeechResult.RmsChanged -> audioLevel.value = result.rmsdB
+                            is SpeechResult.PartialResult -> {
+                                partialText.value = result.text
+                                if (currentState.value != AssistantState.LISTENING) {
+                                    currentState.value = AssistantState.LISTENING
+                                }
+                            }
+                            is SpeechResult.Result -> {
+                                Log.d(TAG, "SpeechResult.Result received: text='${result.text}'")
+                                hasActuallySpoken = true
+                                userQuery.value = result.text
+                                sendToOpenClaw(result.text)
+                            }
+                            is SpeechResult.Error -> {
+                                val elapsed = System.currentTimeMillis() - startTime
+                                val isTimeout = result.code == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                                    result.code == SpeechRecognizer.ERROR_NO_MATCH
+
+                                if (isTimeout && settings.continuousMode && elapsed < 10000) {
+                                    Log.d(TAG, "Speech timeout within 10s window ($elapsed ms), retrying...")
+                                } else if (
+                                    result.code == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                                    result.code == SpeechRecognizer.ERROR_CLIENT
+                                ) {
+                                    speechManager.destroy()
+                                    delay(500)
+                                } else if (isTimeout) {
+                                    val state = currentState.value
+                                    if (state == AssistantState.THINKING || state == AssistantState.SPEAKING) {
+                                        Log.d(TAG, "Speech timeout but AI is $state, not closing session")
+                                        hasActuallySpoken = true
+                                    } else {
+                                        playTone(android.media.ToneGenerator.TONE_PROP_NACK, 100)
+                                        finish()
+                                    }
+                                } else {
+                                    playTone(android.media.ToneGenerator.TONE_PROP_NACK, 100)
+                                    currentState.value = AssistantState.ERROR
+                                    errorMessage.value = result.message
+                                    hasActuallySpoken = true
+                                }
+                            }
+                            else -> Unit
+                        }
+                    }
+                }
+
+                if (listenResult == null && !hasActuallySpoken) {
+                    Log.w(TAG, "Speech recognition timed out (30s). Device may be locked.")
+                    val state = currentState.value
+                    if (state == AssistantState.THINKING || state == AssistantState.SPEAKING) {
+                        Log.d(TAG, "Manual timeout but AI is $state, not closing session")
+                        hasActuallySpoken = true
+                    } else {
+                        finish()
+                        hasActuallySpoken = true
+                    }
+                }
+
+                if (!hasActuallySpoken) {
+                    delay(300)
+                }
+            }
+        }
+    }
+
+    private fun startManualListening(initialDelayMs: Long, preserveManualBuffer: Boolean) {
+        Log.d(TAG, "startListening() called, currentState=${currentState.value}, listeningJob=${listeningJob}, speakingJob=${speakingJob}")
+        listeningJob?.cancel()
+        acquireWakeLock()
+        sendPauseBroadcast()
+
+        val manualMode = true
+        currentState.value = if (preserveManualBuffer) AssistantState.LISTENING else AssistantState.PROCESSING
+        displayText.value = ""
+        userQuery.value = ""
+        if (!preserveManualBuffer) {
+            partialText.value = ""
+        }
+        errorMessage.value = null
+        audioLevel.value = 0f
+        if (!preserveManualBuffer) {
+            manualDictationBuffer.clear()
+        }
+        manualSubmitRequested = false
+        manualSubmissionInProgress = false
+        manualDictationCancelled.value = false
+
+        manualRecognitionActive.value = manualMode
 
         // Fallback: if SpeechResult.Ready doesn't arrive within 2s, force LISTENING
         // so users don't see "Processing" indefinitely while the recognizer warms up
@@ -409,11 +580,13 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
         listeningJob = scope.launch {
             val startTime = System.currentTimeMillis()
             var hasActuallySpoken = false
+            var recognitionPass = 0
             
             // Wait for resources to be released before reopening the mic
             delay(initialDelayMs)
 
             while (isActive && !hasActuallySpoken) {
+                recognitionPass += 1
                 // Request audio focus
                 val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -428,13 +601,20 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
                         android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                 }
 
-                val listenResult = withTimeoutOrNull(30_000L) {
-                    speechManager.startListening(settings.speechLanguage.ifEmpty { null }, settings.speechSilenceTimeout).collectLatest { result ->
+                val collectSpeechResults: suspend () -> Unit = {
+                    speechManager.startListening(
+                        settings.speechLanguage.ifEmpty { null },
+                        settings.speechSilenceTimeout,
+                        segmentedSession = manualMode
+                    ).collectLatest { result ->
                         when (result) {
                             is SpeechResult.Ready -> {
                                 Log.d(TAG, "SpeechResult.Ready received, transitioning to LISTENING")
                                 currentState.value = AssistantState.LISTENING
-                                playTone(android.media.ToneGenerator.TONE_PROP_BEEP)
+                                manualRecognitionActive.value = manualMode
+                                if (!manualMode || recognitionPass == 1) {
+                                    playTone(android.media.ToneGenerator.TONE_PROP_BEEP)
+                                }
                             }
                             is SpeechResult.Processing -> {
                                 // No sound here - thinking ACK sound will play when AI starts processing
@@ -448,7 +628,12 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
                                 audioLevel.value = result.rmsdB
                             }
                             is SpeechResult.PartialResult -> {
-                                partialText.value = result.text
+                                if (manualMode) {
+                                    manualDictationBuffer.updatePartial(result.text)
+                                    partialText.value = manualDictationBuffer.text()
+                                } else {
+                                    partialText.value = result.text
+                                }
                                 // Ensure state is listening if we get partial results
                                 if (currentState.value != AssistantState.LISTENING) {
                                     currentState.value = AssistantState.LISTENING
@@ -456,16 +641,56 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
                             }
                             is SpeechResult.Result -> {
                                 Log.d(TAG, "SpeechResult.Result received: text='${result.text}'")
-                                hasActuallySpoken = true
-                                userQuery.value = result.text
-                                sendToOpenClaw(result.text)
+                                if (manualMode) {
+                                    if (manualSubmitRequested) {
+                                        hasActuallySpoken = true
+                                        completeManualSubmission(result.text)
+                                    } else {
+                                        manualDictationBuffer.commitFinal(result.text)
+                                        partialText.value = manualDictationBuffer.text()
+                                        manualRecognitionActive.value = false
+                                        currentState.value = AssistantState.IDLE
+                                        hasActuallySpoken = true
+                                    }
+                                } else {
+                                    hasActuallySpoken = true
+                                    userQuery.value = result.text
+                                    sendToOpenClaw(result.text)
+                                }
+                            }
+                            is SpeechResult.SegmentResult -> {
+                                if (manualMode) {
+                                    Log.d(TAG, "Manual dictation segment received")
+                                    manualDictationBuffer.commitFinal(result.text)
+                                    partialText.value = manualDictationBuffer.text()
+                                    currentState.value = AssistantState.LISTENING
+                                }
+                            }
+                            is SpeechResult.EndOfSegmentedSession -> {
+                                if (manualMode) {
+                                    manualDictationBuffer.commitPartial()
+                                    partialText.value = manualDictationBuffer.text()
+                                    manualRecognitionActive.value = false
+                                    currentState.value = AssistantState.IDLE
+                                    hasActuallySpoken = true
+                                }
                             }
                             is SpeechResult.Error -> {
                                 val elapsed = System.currentTimeMillis() - startTime
                                 val isTimeout = result.code == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
                                               result.code == SpeechRecognizer.ERROR_NO_MATCH
 
-                                if (isTimeout && settings.continuousMode && elapsed < 10000) {
+                                if (manualMode && manualSubmitRequested) {
+                                    hasActuallySpoken = true
+                                    completeManualSubmission()
+                                } else if (manualMode) {
+                                    Log.d(TAG, "Manual dictation stopped; waiting for a microphone tap")
+                                    manualDictationBuffer.commitPartial()
+                                    partialText.value = manualDictationBuffer.text()
+                                    manualRecognitionActive.value = false
+                                    currentState.value = AssistantState.IDLE
+                                    hasActuallySpoken = true
+                                } else if (isTimeout && settings.continuousMode && elapsed < 10000) {
                                     Log.d(TAG, "Speech timeout within 10s window ($elapsed ms), retrying...")
                                 } else if (
                                     result.code == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
@@ -496,6 +721,21 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
                     }
                 }
 
+                val listenResult = if (manualMode) {
+                    collectSpeechResults()
+                    Unit
+                } else {
+                    withTimeoutOrNull(30_000L) { collectSpeechResults() }
+                }
+
+                if (manualMode && !hasActuallySpoken) {
+                    manualDictationBuffer.commitPartial()
+                    partialText.value = manualDictationBuffer.text()
+                    manualRecognitionActive.value = false
+                    currentState.value = AssistantState.IDLE
+                    hasActuallySpoken = true
+                }
+
                 if (listenResult == null && !hasActuallySpoken) {
                     Log.w(TAG, "Speech recognition timed out (30s). Device may be locked.")
                     // Manual timeout - only close session if not thinking/speaking
@@ -514,6 +754,106 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
                 }
             }
         }
+    }
+
+    private fun requestManualSubmission() {
+        if (settings.dictationMode != SettingsRepository.DICTATION_MODE_MANUAL ||
+            manualSubmissionInProgress ||
+            manualDictationBuffer.text().isBlank()
+        ) {
+            return
+        }
+
+        manualSubmitRequested = true
+        manualSubmissionInProgress = true
+        currentState.value = AssistantState.PROCESSING
+        if (manualRecognitionActive.value) {
+            speechManager.stopListening()
+        } else {
+            completeManualSubmission()
+            return
+        }
+
+        // Some recognizer implementations do not deliver a final result after
+        // stopListening(). Submit the latest partial transcript as a fallback.
+        scope.launch {
+            delay(1500L)
+            if (manualSubmitRequested) {
+                completeManualSubmission()
+            }
+        }
+    }
+
+    private fun completeManualSubmission(finalSegment: String? = null) {
+        if (!manualSubmitRequested) return
+
+        finalSegment?.let(manualDictationBuffer::commitFinal)
+        val message = manualDictationBuffer.text().trim()
+        manualSubmitRequested = false
+        manualSubmissionInProgress = false
+        manualRecognitionActive.value = false
+
+        if (message.isBlank()) {
+            currentState.value = AssistantState.LISTENING
+            return
+        }
+
+        listeningJob?.cancel()
+        speechManager.destroy()
+        abandonAudioFocus()
+        manualDictationBuffer.clear()
+        partialText.value = ""
+        userQuery.value = message
+        sendToOpenClaw(message)
+    }
+
+    private fun cancelManualDictation() {
+        if (settings.dictationMode != SettingsRepository.DICTATION_MODE_MANUAL ||
+            manualSubmissionInProgress
+        ) {
+            return
+        }
+
+        manualSubmitRequested = false
+        manualDictationBuffer.clear()
+        partialText.value = ""
+        userQuery.value = ""
+        listeningJob?.cancel()
+        speechManager.destroy()
+        abandonAudioFocus()
+        manualRecognitionActive.value = false
+        manualDictationCancelled.value = true
+        currentState.value = AssistantState.IDLE
+    }
+
+    private fun pauseManualDictation() {
+        if (settings.dictationMode != SettingsRepository.DICTATION_MODE_MANUAL ||
+            manualSubmissionInProgress ||
+            !manualRecognitionActive.value
+        ) {
+            return
+        }
+
+        manualSubmitRequested = false
+        manualDictationBuffer.commitPartial()
+        partialText.value = manualDictationBuffer.text()
+        listeningJob?.cancel()
+        speechManager.destroy()
+        abandonAudioFocus()
+        manualRecognitionActive.value = false
+        manualDictationCancelled.value = false
+        currentState.value = AssistantState.IDLE
+    }
+
+    private fun resumeManualDictation() {
+        if (settings.dictationMode != SettingsRepository.DICTATION_MODE_MANUAL ||
+            manualSubmissionInProgress ||
+            manualRecognitionActive.value
+        ) {
+            return
+        }
+
+        startListening(preserveManualBuffer = true)
     }
 
     private var thinkingSoundJob: Job? = null
@@ -957,7 +1297,15 @@ fun AssistantUI(
     audioLevel: Float,
     onClose: () -> Unit,
     onRetry: () -> Unit,
-    onInterrupt: () -> Unit = {}
+    onInterrupt: () -> Unit = {},
+    manualDictationEnabled: Boolean = false,
+    manualDictationListening: Boolean = false,
+    manualDictationCancelled: Boolean = false,
+    canSubmitManualDictation: Boolean = false,
+    onSubmitManualDictation: () -> Unit = {},
+    onCancelManualDictation: () -> Unit = {},
+    onPauseManualDictation: () -> Unit = {},
+    onResumeManualDictation: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier
@@ -1022,6 +1370,8 @@ fun AssistantUI(
             // Combine breathing (baseScale) with voice reaction. 
             // When speaking loudly, the voice reaction should dominate.
             val finalScale = if (state == AssistantState.LISTENING) maxOf(baseScale, animatedLevelScale) else 1f
+            val resumeDictationDescription = stringResource(R.string.manual_dictation_resume)
+            val pauseDictationDescription = stringResource(R.string.manual_dictation_pause)
 
             Box(
                 modifier = Modifier
@@ -1046,6 +1396,19 @@ fun AssistantUI(
                                 onClickLabel = stringResource(R.string.interrupt_description),
                                 role = Role.Button
                             ) { onInterrupt() }
+                        } else if (manualDictationEnabled && manualDictationListening &&
+                            (state == AssistantState.LISTENING || state == AssistantState.PROCESSING)
+                        ) {
+                            Modifier.clickable(
+                                onClickLabel = pauseDictationDescription,
+                                role = Role.Button
+                            ) { onPauseManualDictation() }
+                        } else if (manualDictationEnabled && !manualDictationListening &&
+                            state == AssistantState.IDLE) {
+                            Modifier.clickable(
+                                onClickLabel = resumeDictationDescription,
+                                role = Role.Button
+                            ) { onResumeManualDictation() }
                         } else {
                             Modifier
                         }
@@ -1063,8 +1426,9 @@ fun AssistantUI(
             Spacer(modifier = Modifier.height(24.dp))
 
             // Status text
-            Text(
-                text = when (state) {
+            val statusText = if (manualDictationEnabled && state == AssistantState.IDLE) {
+                if (manualDictationCancelled) null else stringResource(R.string.manual_dictation_paused)
+            } else when (state) {
                     AssistantState.LISTENING -> stringResource(R.string.state_listening)
                     AssistantState.PROCESSING -> stringResource(R.string.state_processing)
                     AssistantState.THINKING -> stringResource(R.string.state_thinking)
@@ -1072,21 +1436,60 @@ fun AssistantUI(
                     AssistantState.SPEAKING -> stringResource(R.string.state_speaking)
                     AssistantState.ERROR -> stringResource(R.string.state_error)
                     else -> stringResource(R.string.state_ready)
-                },
-                fontSize = 14.sp,
-                color = Color.Gray
-            )
+                }
+            if (statusText != null) {
+                Text(
+                    text = statusText,
+                    fontSize = 14.sp,
+                    color = Color.Gray
+                )
+            }
 
             Spacer(modifier = Modifier.height(8.dp))
 
             // Recognized text (partial results)
-            if (partialText.isNotBlank() && state == AssistantState.LISTENING) {
+            if (partialText.isNotBlank() &&
+                (state == AssistantState.LISTENING ||
+                    (manualDictationEnabled && state == AssistantState.IDLE))
+            ) {
                 Text(
                     text = partialText,
                     fontSize = 16.sp,
                     color = Color.Gray,
                     textAlign = TextAlign.Center
                 )
+            }
+
+            if (manualDictationEnabled &&
+                (state == AssistantState.IDLE ||
+                    state == AssistantState.LISTENING ||
+                    state == AssistantState.PROCESSING)
+            ) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onCancelManualDictation,
+                        enabled = manualDictationListening || partialText.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(stringResource(R.string.manual_dictation_cancel))
+                    }
+                    Button(
+                        onClick = onSubmitManualDictation,
+                        enabled = canSubmitManualDictation,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = null
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(stringResource(R.string.manual_dictation_send))
+                    }
+                }
             }
 
             // User Query (Final Result)

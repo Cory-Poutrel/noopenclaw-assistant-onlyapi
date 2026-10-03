@@ -162,6 +162,15 @@ Pour plus de détails, consultez le site officiel de VOICEVOX.</string>
 <string name="resume_latest_session_desc">Continuer la conversation précédente lors de l\'activation</string>
 <string name="speech_silence_timeout">Délai de silence</string>
 <string name="speech_silence_timeout_desc">Temps d\'attente après une pause de parole</string>
+<string name="dictation_mode">Mode de dictée</string>
+<string name="dictation_mode_desc">Choisissez si une pause envoie le message ou si vous le validez manuellement</string>
+<string name="dictation_mode_automatic">Automatique</string>
+<string name="dictation_mode_manual">Manuel</string>
+<string name="manual_dictation_send">Envoyer</string>
+<string name="manual_dictation_cancel">Annuler</string>
+<string name="manual_dictation_resume">Reprendre la dictée</string>
+<string name="manual_dictation_pause">Mettre la dictée en pause</string>
+<string name="manual_dictation_paused">En pause</string>
 <string name="speech_language_label">Langage de la parole</string>
 <string name="speech_language_desc">Langue pour la reconnaissance vocale et les réponses</string>
 <string name="display_language_label">Langue d\'affichage</string>

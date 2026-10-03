@@ -50,8 +50,8 @@ object UpdateChecker {
                 val responseBody = response.body?.string() ?: return@withContext null
                 val release = gson.fromJson(responseBody, GithubRelease::class.java)
 
-                val latestVersion = release.tagName.removePrefix("v")
-                val current = currentVersion.removePrefix("v")
+                val latestVersion = release.tagName.removePrefix("v").substringBefore("-")
+                val current = currentVersion.removePrefix("v").substringBefore("-")
 
                 // Simple string comparison for versions (assuming semantic versioning format like 1.2.3)
                 // In a more complex scenario, a proper semver parser should be used.

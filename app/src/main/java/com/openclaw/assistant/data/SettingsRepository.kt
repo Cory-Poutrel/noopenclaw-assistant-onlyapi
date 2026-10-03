@@ -179,6 +179,11 @@ class SettingsRepository(context: Context) {
         get() = prefs.getLong(KEY_SPEECH_SILENCE_TIMEOUT, 5000L)
         set(value) = prefs.edit().putLong(KEY_SPEECH_SILENCE_TIMEOUT, value).apply()
 
+    // Dictation submission mode (automatic silence detection or explicit user action)
+    var dictationMode: String
+        get() = prefs.getString(KEY_DICTATION_MODE, DICTATION_MODE_AUTOMATIC) ?: DICTATION_MODE_AUTOMATIC
+        set(value) = prefs.edit().putString(KEY_DICTATION_MODE, value).apply()
+
     // Speech recognition language (BCP-47 tag, empty = system default)
     var speechLanguage: String
         get() = prefs.getString(KEY_SPEECH_LANGUAGE, "") ?: ""
@@ -305,6 +310,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_CONNECTION_TYPE = "connection_type"
         private const val KEY_WAKEWORD_CONNECTION_TYPE = "wakeword_connection_type"
         private const val KEY_SPEECH_SILENCE_TIMEOUT = "speech_silence_timeout"
+        private const val KEY_DICTATION_MODE = "dictation_mode"
         private const val KEY_THINKING_SOUND_ENABLED = "thinking_sound_enabled"
         private const val KEY_FILLER_PHRASES_ENABLED = "filler_phrases_enabled"
         private const val KEY_TTS_BARGE_IN_ENABLED = "tts_barge_in_enabled"
@@ -336,6 +342,9 @@ class SettingsRepository(context: Context) {
         
         const val CONNECTION_TYPE_GATEWAY = "gateway"
         const val CONNECTION_TYPE_HTTP = "http"
+
+        const val DICTATION_MODE_AUTOMATIC = "automatic"
+        const val DICTATION_MODE_MANUAL = "manual"
         
         const val GOOGLE_TTS_PACKAGE = "com.google.android.tts"
         
