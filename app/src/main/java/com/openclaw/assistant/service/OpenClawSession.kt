@@ -16,6 +16,8 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,8 +30,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -55,12 +62,14 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.ceil
+import kotlin.math.floor
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
-import com.openclaw.assistant.ui.theme.OpenClawAssistantTheme
+import com.openclaw.assistant.ui.theme.VoiceOverlayTheme
 
 /**
  * Voice Interaction Session
@@ -105,6 +114,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     private var displayText = mutableStateOf("")
     private var userQuery = mutableStateOf("") // User's spoken text
     private var partialText = mutableStateOf("")
+    private val conversationMessages = mutableStateListOf<ConversationMessage>()
     private var errorMessage = mutableStateOf<String?>(null)
     private var audioLevel = mutableStateOf(0f) // Audio level for visualization
     private val manualDictationBuffer = ManualDictationBuffer()
@@ -112,6 +122,8 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
     private var manualDictationCancelled = mutableStateOf(false)
     private var manualSubmitRequested = false
     private var manualSubmissionInProgress = false
+    private val assistantTouchableRegion = android.graphics.Rect()
+    private var assistantContentView: View? = null
 
     private val localizedUiContext: Context by lazy {
         val languageTag = settings.appLanguage.trim()
@@ -204,31 +216,56 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
             }
             
             setContent {
-                AssistantUI(
-                    state = currentState.value,
-                    displayText = displayText.value,
-                    userQuery = userQuery.value,
-                    partialText = partialText.value,
-                    errorMessage = errorMessage.value,
-                    audioLevel = audioLevel.value,
-                    onClose = {
-                        isUserDismissed = true
-                        finish()
-                    },
-                    onRetry = { startListening() },
-                    onInterrupt = { interruptAndListen() },
-                    manualDictationEnabled = settings.dictationMode == SettingsRepository.DICTATION_MODE_MANUAL,
-                    manualDictationListening = manualRecognitionActive.value,
-                    manualDictationCancelled = manualDictationCancelled.value,
-                    canSubmitManualDictation = manualDictationBuffer.text().isNotBlank() && !manualSubmissionInProgress,
-                    onSubmitManualDictation = { requestManualSubmission() },
-                    onCancelManualDictation = { cancelManualDictation() },
-                    onPauseManualDictation = { pauseManualDictation() },
-                    onResumeManualDictation = { resumeManualDictation() }
-                )
+                VoiceOverlayTheme(darkTheme = settings.assistantOverlayDarkTheme) {
+                    AssistantUI(
+                        state = currentState.value,
+                        messages = conversationMessages,
+                        darkTheme = settings.assistantOverlayDarkTheme,
+                        displayText = displayText.value,
+                        userQuery = userQuery.value,
+                        partialText = partialText.value,
+                        errorMessage = errorMessage.value,
+                        audioLevel = audioLevel.value,
+                        onClose = {
+                            isUserDismissed = true
+                            finish()
+                        },
+                        onRetry = { startListening() },
+                        onInterrupt = { interruptAndListen() },
+                        manualDictationEnabled = settings.dictationMode == SettingsRepository.DICTATION_MODE_MANUAL,
+                        manualDictationListening = manualRecognitionActive.value,
+                        manualDictationCancelled = manualDictationCancelled.value,
+                        canSubmitManualDictation = manualDictationBuffer.text().isNotBlank() && !manualSubmissionInProgress,
+                        onSubmitManualDictation = { requestManualSubmission() },
+                        onCancelManualDictation = { cancelManualDictation() },
+                        onPauseManualDictation = { pauseManualDictation() },
+                        onResumeManualDictation = { resumeManualDictation() },
+                        onPanelBoundsChanged = { left, top, right, bottom ->
+                            val changed = assistantTouchableRegion.left != left ||
+                                assistantTouchableRegion.top != top ||
+                                assistantTouchableRegion.right != right ||
+                                assistantTouchableRegion.bottom != bottom
+                            if (changed) {
+                                assistantTouchableRegion.set(left, top, right, bottom)
+                                assistantContentView?.requestLayout()
+                            }
+                        }
+                    )
+                }
             }
         }
+        assistantContentView = composeView
         return composeView
+    }
+
+    override fun onComputeInsets(outInsets: VoiceInteractionSession.Insets) {
+        super.onComputeInsets(outInsets)
+        if (assistantTouchableRegion.isEmpty) {
+            outInsets.touchableInsets = VoiceInteractionSession.Insets.TOUCHABLE_INSETS_FRAME
+        } else {
+            outInsets.touchableInsets = VoiceInteractionSession.Insets.TOUCHABLE_INSETS_REGION
+            outInsets.touchableRegion.set(assistantTouchableRegion)
+        }
     }
 
     override fun onShow(args: Bundle?, showFlags: Int) {
@@ -877,6 +914,12 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
 
     private fun sendToOpenClaw(message: String) {
         Log.d(TAG, "sendToOpenClaw() called, transitioning to THINKING")
+        val submittedMessage = message.trim()
+        if (submittedMessage.isNotEmpty()) {
+            conversationMessages.add(ConversationMessage(text = submittedMessage, isUser = true))
+        }
+        userQuery.value = ""
+        partialText.value = ""
         currentState.value = AssistantState.THINKING
         playTone(android.media.ToneGenerator.TONE_PROP_ACK, 150)
         startThinkingSound()
@@ -1019,7 +1062,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
             cancelWaitPhraseTimer()
 
             if (responseText != null) {
-                displayText.value = responseText
+                conversationMessages.add(ConversationMessage(text = responseText, isUser = false))
                 handleResponseReceived(responseText)
             } else {
                 cancelInitialFillerPhrase()
@@ -1056,7 +1099,7 @@ class OpenClawSession(context: Context) : VoiceInteractionSession(context),
             onSuccess = { response ->
                 val responseText = response.getResponseText()
                 if (responseText != null) {
-                    displayText.value = responseText
+                    conversationMessages.add(ConversationMessage(text = responseText, isUser = false))
                     handleResponseReceived(responseText)
                 } else if (response.error != null) {
                     cancelInitialFillerPhrase()
@@ -1284,12 +1327,54 @@ enum class AssistantState {
     ERROR
 }
 
+data class ConversationMessage(
+    val text: String,
+    val isUser: Boolean
+)
+
+@Composable
+private fun ConversationBubble(
+    text: String,
+    isUser: Boolean
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.88f),
+            shape = RoundedCornerShape(16.dp),
+            color = if (isUser) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            contentColor = if (isUser) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        ) {
+            Text(
+                text = text,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                fontSize = 17.sp,
+                lineHeight = 23.sp,
+                textAlign = TextAlign.Start,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
 /**
  * Assistant UI (Compose)
  */
 @Composable
 fun AssistantUI(
     state: AssistantState,
+    messages: List<ConversationMessage> = emptyList(),
+    darkTheme: Boolean = false,
     displayText: String,
     userQuery: String,
     partialText: String,
@@ -1305,39 +1390,62 @@ fun AssistantUI(
     onSubmitManualDictation: () -> Unit = {},
     onCancelManualDictation: () -> Unit = {},
     onPauseManualDictation: () -> Unit = {},
-    onResumeManualDictation: () -> Unit = {}
+    onResumeManualDictation: () -> Unit = {},
+    onPanelBoundsChanged: (left: Int, top: Int, right: Int, bottom: Int) -> Unit = { _, _, _, _ -> }
 ) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.7f))
+            .navigationBarsPadding()
             .padding(16.dp),
         contentAlignment = Alignment.BottomCenter
     ) {
-        Column(
-            modifier = Modifier
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .offset(y = 10.dp)
+                    .graphicsLayer {
+                        scaleX = 1.04f
+                        scaleY = 1.10f
+                    }
+                    .blur(
+                        radius = 24.dp,
+                        edgeTreatment = BlurredEdgeTreatment.Unbounded
+                    )
+                    .background(
+                        color = if (darkTheme) {
+                            Color.White.copy(alpha = 0.30f)
+                        } else {
+                            Color.Black.copy(alpha = 0.78f)
+                        },
+                        shape = RoundedCornerShape(24.dp)
+                    )
+            )
+            Column(
+                modifier = Modifier
                 .fillMaxWidth()
+                .shadow(
+                    elevation = 12.dp,
+                    shape = RoundedCornerShape(24.dp),
+                    clip = false,
+                    ambientColor = Color.Black.copy(alpha = 0.35f),
+                    spotColor = Color.Black.copy(alpha = 0.50f)
+                )
                 .clip(RoundedCornerShape(24.dp))
-                .background(Color.White)
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Close button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                IconButton(onClick = onClose) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = stringResource(R.string.close),
-                        tint = Color.Gray
+                .background(MaterialTheme.colorScheme.surface)
+                .onGloballyPositioned { coordinates ->
+                    val bounds = coordinates.boundsInWindow()
+                    onPanelBoundsChanged(
+                        floor(bounds.left).toInt(),
+                        floor(bounds.top).toInt(),
+                        ceil(bounds.right).toInt(),
+                        ceil(bounds.bottom).toInt()
                     )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
+                .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
             // Microphone icon
             val infiniteTransition = rememberInfiniteTransition(label = "mic_pulse")
             val baseScale by infiniteTransition.animateFloat(
@@ -1375,55 +1483,75 @@ fun AssistantUI(
 
             Box(
                 modifier = Modifier
-                    .size(80.dp)
-                    .graphicsLayer {
-                        scaleX = finalScale
-                        scaleY = finalScale
-                    }
-                    .clip(CircleShape)
-                    .background(
-                        when (state) {
-                            AssistantState.LISTENING -> Color(0xFF4CAF50)
-                            AssistantState.SPEAKING, AssistantState.PREPARING_SPEECH -> Color(0xFF2196F3)
-                            AssistantState.THINKING, AssistantState.PROCESSING -> Color(0xFFFFC107)
-                            AssistantState.ERROR -> Color(0xFFF44336)
-                            else -> Color(0xFF9E9E9E)
-                        }
-                    )
-                    .then(
-                        if (state == AssistantState.SPEAKING || state == AssistantState.PREPARING_SPEECH) {
-                            Modifier.clickable(
-                                onClickLabel = stringResource(R.string.interrupt_description),
-                                role = Role.Button
-                            ) { onInterrupt() }
-                        } else if (manualDictationEnabled && manualDictationListening &&
-                            (state == AssistantState.LISTENING || state == AssistantState.PROCESSING)
-                        ) {
-                            Modifier.clickable(
-                                onClickLabel = pauseDictationDescription,
-                                role = Role.Button
-                            ) { onPauseManualDictation() }
-                        } else if (manualDictationEnabled && !manualDictationListening &&
-                            state == AssistantState.IDLE) {
-                            Modifier.clickable(
-                                onClickLabel = resumeDictationDescription,
-                                role = Role.Button
-                            ) { onResumeManualDictation() }
-                        } else {
-                            Modifier
-                        }
-                    ),
+                    .fillMaxWidth()
+                    .height(96.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = if (state == AssistantState.ERROR) Icons.Default.MicOff else Icons.Default.Mic,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(40.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(80.dp)
+                        .offset(y = 8.dp)
+                        .graphicsLayer {
+                            scaleX = finalScale
+                            scaleY = finalScale
+                        }
+                        .clip(CircleShape)
+                        .background(
+                            when (state) {
+                                AssistantState.LISTENING -> Color(0xFF4CAF50)
+                                AssistantState.SPEAKING, AssistantState.PREPARING_SPEECH -> Color(0xFF2196F3)
+                                AssistantState.THINKING, AssistantState.PROCESSING -> Color(0xFFFFC107)
+                                AssistantState.ERROR -> Color(0xFFF44336)
+                                else -> Color(0xFF9E9E9E)
+                            }
+                        )
+                        .then(
+                            if (state == AssistantState.SPEAKING || state == AssistantState.PREPARING_SPEECH) {
+                                Modifier.clickable(
+                                    onClickLabel = stringResource(R.string.interrupt_description),
+                                    role = Role.Button
+                                ) { onInterrupt() }
+                            } else if (manualDictationEnabled && manualDictationListening &&
+                                (state == AssistantState.LISTENING || state == AssistantState.PROCESSING)
+                            ) {
+                                Modifier.clickable(
+                                    onClickLabel = pauseDictationDescription,
+                                    role = Role.Button
+                                ) { onPauseManualDictation() }
+                            } else if (manualDictationEnabled && !manualDictationListening &&
+                                state == AssistantState.IDLE) {
+                                Modifier.clickable(
+                                    onClickLabel = resumeDictationDescription,
+                                    role = Role.Button
+                                ) { onResumeManualDictation() }
+                            } else {
+                                Modifier
+                            }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (state == AssistantState.ERROR) Icons.Default.MicOff else Icons.Default.Mic,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(y = (-8).dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = stringResource(R.string.close),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Status text
             val statusText = if (manualDictationEnabled && state == AssistantState.IDLE) {
@@ -1441,23 +1569,63 @@ fun AssistantUI(
                 Text(
                     text = statusText,
                     fontSize = 14.sp,
-                    color = Color.Gray
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Recognized text (partial results)
-            if (partialText.isNotBlank() &&
+            val showPartialText = partialText.isNotBlank() &&
                 (state == AssistantState.LISTENING ||
                     (manualDictationEnabled && state == AssistantState.IDLE))
-            ) {
-                Text(
-                    text = partialText,
-                    fontSize = 16.sp,
-                    color = Color.Gray,
-                    textAlign = TextAlign.Center
-                )
+            val spokenText = if (showPartialText) partialText else userQuery
+            val hasTranscriptContent = messages.isNotEmpty() || spokenText.isNotBlank() ||
+                (displayText.isNotBlank() && state != AssistantState.LISTENING) || errorMessage != null
+            val transcriptScrollState = rememberScrollState()
+            LaunchedEffect(messages.size, partialText, userQuery, displayText, errorMessage) {
+                withFrameNanos { }
+                transcriptScrollState.scrollTo(transcriptScrollState.maxValue)
+            }
+
+            if (hasTranscriptContent) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 160.dp)
+                        .verticalScroll(transcriptScrollState),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    messages.forEachIndexed { index, message ->
+                        if (index > 0) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        ConversationBubble(text = message.text, isUser = message.isUser)
+                    }
+
+                    if (spokenText.isNotBlank()) {
+                        if (messages.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        ConversationBubble(text = spokenText, isUser = true)
+                    }
+
+                    if (displayText.isNotBlank() && state != AssistantState.LISTENING) {
+                        if (messages.isNotEmpty() || spokenText.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        ConversationBubble(text = displayText, isUser = false)
+                    }
+
+                    if (errorMessage != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = errorMessage,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
             }
 
             if (manualDictationEnabled &&
@@ -1492,45 +1660,15 @@ fun AssistantUI(
                 }
             }
 
-            // User Query (Final Result)
-            if (userQuery.isNotBlank()) {
-                Text(
-                    text = "$userQuery",
-                    fontSize = 16.sp,
-                    color = Color.DarkGray, // Slightly different color
-                    textAlign = TextAlign.Center,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                )
-            }
-
-            // Main text
-            if (displayText.isNotBlank() && state != AssistantState.LISTENING) {
-                Text(
-                    text = displayText,
-                    fontSize = 18.sp,
-                    color = Color.Black,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            }
-
             // Error message
             if (errorMessage != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = errorMessage,
-                    fontSize = 14.sp,
-                    color = Color.Red,
-                    textAlign = TextAlign.Center
-                )
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(onClick = onRetry) {
                     Text(stringResource(R.string.action_try_again))
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            }
         }
     }
 }

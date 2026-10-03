@@ -184,6 +184,10 @@ class SettingsRepository(context: Context) {
         get() = prefs.getString(KEY_DICTATION_MODE, DICTATION_MODE_AUTOMATIC) ?: DICTATION_MODE_AUTOMATIC
         set(value) = prefs.edit().putString(KEY_DICTATION_MODE, value).apply()
 
+    var assistantOverlayDarkTheme: Boolean
+        get() = prefs.getBoolean(KEY_ASSISTANT_OVERLAY_DARK_THEME, false)
+        set(value) = prefs.edit().putBoolean(KEY_ASSISTANT_OVERLAY_DARK_THEME, value).apply()
+
     // Speech recognition language (BCP-47 tag, empty = system default)
     var speechLanguage: String
         get() = prefs.getString(KEY_SPEECH_LANGUAGE, "") ?: ""
@@ -311,6 +315,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_WAKEWORD_CONNECTION_TYPE = "wakeword_connection_type"
         private const val KEY_SPEECH_SILENCE_TIMEOUT = "speech_silence_timeout"
         private const val KEY_DICTATION_MODE = "dictation_mode"
+        private const val KEY_ASSISTANT_OVERLAY_DARK_THEME = "assistant_overlay_dark_theme"
         private const val KEY_THINKING_SOUND_ENABLED = "thinking_sound_enabled"
         private const val KEY_FILLER_PHRASES_ENABLED = "filler_phrases_enabled"
         private const val KEY_TTS_BARGE_IN_ENABLED = "tts_barge_in_enabled"

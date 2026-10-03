@@ -175,6 +175,8 @@
     <string name="dictation_mode_desc">Choose whether a pause sends the message or you submit it manually</string>
     <string name="dictation_mode_automatic">Automatic</string>
     <string name="dictation_mode_manual">Manual</string>
+    <string name="assistant_overlay_dark_theme">Dark assistant window</string>
+    <string name="assistant_overlay_dark_theme_desc">Use a dark background for the voice assistant window</string>
     <string name="manual_dictation_send">Send</string>
     <string name="manual_dictation_cancel">Cancel</string>
     <string name="manual_dictation_resume">Resume dictation</string>

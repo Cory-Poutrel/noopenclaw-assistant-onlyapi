@@ -165,6 +165,8 @@
 <string name="dictation_mode_desc">一時停止で送信するか、手動で送信するかを選択します</string>
 <string name="dictation_mode_automatic">自動</string>
 <string name="dictation_mode_manual">手動</string>
+<string name="assistant_overlay_dark_theme">アシスタント画面をダークにする</string>
+<string name="assistant_overlay_dark_theme_desc">音声アシスタント画面に暗い背景を使用します</string>
 <string name="manual_dictation_send">送信</string>
 <string name="manual_dictation_cancel">キャンセル</string>
 <string name="manual_dictation_resume">音声入力を再開</string>

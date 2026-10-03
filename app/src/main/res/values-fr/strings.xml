@@ -166,6 +166,8 @@ Pour plus de détails, consultez le site officiel de VOICEVOX.</string>
 <string name="dictation_mode_desc">Choisissez si une pause envoie le message ou si vous le validez manuellement</string>
 <string name="dictation_mode_automatic">Automatique</string>
 <string name="dictation_mode_manual">Manuel</string>
+<string name="assistant_overlay_dark_theme">Fenêtre d’assistant sombre</string>
+<string name="assistant_overlay_dark_theme_desc">Utiliser un fond sombre pour la fenêtre de l’assistant vocal</string>
 <string name="manual_dictation_send">Envoyer</string>
 <string name="manual_dictation_cancel">Annuler</string>
 <string name="manual_dictation_resume">Reprendre la dictée</string>

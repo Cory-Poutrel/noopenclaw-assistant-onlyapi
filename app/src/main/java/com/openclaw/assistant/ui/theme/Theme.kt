@@ -27,6 +27,48 @@ private val OpenClawColorScheme = darkColorScheme(
     error = OpenClawError
 )
 
+private val OpenClawLightColorScheme = lightColorScheme(
+    primary = OpenClawOrange,
+    secondary = OpenClawPopYellow,
+    tertiary = OpenClawOrange,
+    background = Color(0xFFF5F5F5),
+    surface = Color.White,
+    onPrimary = Color.White,
+    onSecondary = Color.Black,
+    onTertiary = Color.White,
+    onBackground = Color(0xFF1B1B1B),
+    onSurface = Color(0xFF1B1B1B),
+    error = OpenClawError
+)
+
+private val VoiceOverlayDarkColorScheme = darkColorScheme(
+    primary = Color(0xFFD0BCFF),
+    onPrimary = Color(0xFF381E72),
+    primaryContainer = Color(0xFF4F378B),
+    onPrimaryContainer = Color(0xFFEADDFF),
+    secondary = Color(0xFFCCC2DC),
+    background = OpenClawDarkGrey,
+    surface = OpenClawSurfaceGrey,
+    onBackground = OpenClawTextPrimary,
+    onSurface = OpenClawTextPrimary,
+    onSurfaceVariant = OpenClawTextSecondary,
+    error = Color(0xFFFFB4AB)
+)
+
+private val VoiceOverlayLightColorScheme = lightColorScheme(
+    primary = Color(0xFF6750A4),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFEADDFF),
+    onPrimaryContainer = Color(0xFF21005D),
+    secondary = Color(0xFF625B71),
+    background = Color(0xFFF5F5F5),
+    surface = Color.White,
+    onBackground = Color(0xFF1B1B1B),
+    onSurface = Color(0xFF1B1B1B),
+    onSurfaceVariant = Color(0xFF49454F),
+    error = Color(0xFFBA1A1A)
+)
+
 // Manrope TTF not bundled — use system sans-serif to avoid FontNotFoundException
 val Manrope = FontFamily.SansSerif
 
@@ -47,10 +89,10 @@ private val AppTypography = Typography(
 
 @Composable
 fun OpenClawAssistantTheme(
+    darkTheme: Boolean = true,
     content: @Composable () -> Unit
 ) {
-    // Always use the OpenClaw dark scheme
-    val colorScheme = OpenClawColorScheme
+    val colorScheme = if (darkTheme) OpenClawColorScheme else OpenClawLightColorScheme
     
     val view = LocalView.current
     if (!view.isInEditMode) {
@@ -59,13 +101,25 @@ fun OpenClawAssistantTheme(
             if (context is Activity) {
                 val window = context.window
                 window.statusBarColor = colorScheme.background.toArgb()
-                WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+                WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
             }
         }
     }
 
     MaterialTheme(
         colorScheme = colorScheme,
+        typography = AppTypography,
+        content = content
+    )
+}
+
+@Composable
+fun VoiceOverlayTheme(
+    darkTheme: Boolean,
+    content: @Composable () -> Unit
+) {
+    MaterialTheme(
+        colorScheme = if (darkTheme) VoiceOverlayDarkColorScheme else VoiceOverlayLightColorScheme,
         typography = AppTypography,
         content = content
     )

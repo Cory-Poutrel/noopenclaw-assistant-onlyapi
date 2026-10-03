@@ -258,6 +258,7 @@ fun SettingsScreen(
     var wakeWordSensitivity by rememberSaveable { mutableStateOf(settings.wakeWordSensitivity) }
     var speechSilenceTimeout by rememberSaveable { mutableStateOf(settings.speechSilenceTimeout.toFloat().coerceIn(5000f, 30000f)) }
     var dictationMode by rememberSaveable { mutableStateOf(settings.dictationMode) }
+    var assistantOverlayDarkTheme by rememberSaveable { mutableStateOf(settings.assistantOverlayDarkTheme) }
     var speechLanguage by rememberSaveable { mutableStateOf(settings.speechLanguage) }
     var appLanguage by rememberSaveable { mutableStateOf(settings.appLanguage) }
     var thinkingSoundEnabled by rememberSaveable { mutableStateOf(settings.thinkingSoundEnabled) }
@@ -485,6 +486,7 @@ fun SettingsScreen(
                             settings.wakewordConnectionType = wakewordConnectionType
                             settings.speechSilenceTimeout = speechSilenceTimeout.toLong()
                             settings.dictationMode = dictationMode
+                            settings.assistantOverlayDarkTheme = assistantOverlayDarkTheme
                             settings.speechLanguage = speechLanguage
                             settings.appLanguage = appLanguage
                             settings.thinkingSoundEnabled = thinkingSoundEnabled
@@ -1313,6 +1315,30 @@ fun SettingsScreen(
                             Text(stringResource(R.string.tts_barge_in_desc), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                         }
                         Switch(checked = ttsBargeInEnabled, onCheckedChange = { ttsBargeInEnabled = it })
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), thickness = 0.5.dp)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.assistant_overlay_dark_theme),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                stringResource(R.string.assistant_overlay_dark_theme_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = assistantOverlayDarkTheme,
+                            onCheckedChange = { assistantOverlayDarkTheme = it }
+                        )
                     }
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), thickness = 0.5.dp)
